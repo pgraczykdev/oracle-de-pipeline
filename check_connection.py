@@ -17,9 +17,5 @@ with connection.cursor() as cur:
     cur.execute("SELECT 'połączono!' FROM dual")
     print(cur.fetchone()[0])
 
-    cur.execute("SELECT COUNT(*) FROM sh.sales")
-    print("SH.SALES wierszy:", cur.fetchone()[0])
-
-
 connection.close()
 
