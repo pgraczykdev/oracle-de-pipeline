@@ -11,6 +11,7 @@ load_dotenv()
 oracledb.defaults.fetch_decimals = True
 
 OUTPUT_DIR = Path("data/raw")
+DIMENSION_TABLES = ["channels", "products", "customers", "times"]
 
 
 def get_connection():
@@ -23,7 +24,6 @@ def get_connection():
         wallet_password=os.environ["WALLET_PASSWORD"],
     )
 
-
 def write_parquet(df: pl.DataFrame, name: str) -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
@@ -32,25 +32,29 @@ def write_parquet(df: pl.DataFrame, name: str) -> Path:
     return path
 
 
+def extract_table(conn, table: str) -> Path:
+    df = pl.read_database(f"SELECT * FROM sh.{table}", connection=conn)
+    path = write_parquet(df, table)
+    print(f"{table}: {df.height} rows -> {path}")
+    return path
+
+
 if __name__ == "__main__":
     with get_connection() as conn:
-        channels = pl.read_database("SELECT * FROM sh.channels", connection=conn)
-        p1 = write_parquet(channels, "channels")
-        print(f"channels: {channels.height} rows -> {p1}")
+        for table in DIMENSION_TABLES:
+            extract_table(conn, table)
 
-        sales_query = """
-            SELECT
-                prod_id,
-                cust_id,
-                time_id,
-                channel_id,
-                amount_sold
-            FROM sh.sales
-            FETCH FIRST 1000 ROWS ONLY
-        """
+        salesQuery = """
+                SELECT
+                    prod_id,
+                    cust_id,
+                    time_id,
+                    channel_id,
+                    amount_sold
+                FROM sh.sales
+                FETCH FIRST 1000 ROWS ONLY
+            """
 
-        sales = pl.read_database(sales_query, connection=conn)
-        print("--- schema sales ---")
-        print(sales.schema)        # amount_sold powinno być Decimal, nie Float64
-        p2 = write_parquet(sales, "sales_sample")
-        print(f"sales_sample: {sales.height} rows -> {p2}")
+        sales_sample = pl.read_database(salesQuery, conn)
+        path = write_parquet(sales_sample, "sales_sample")
+        print(f"sales_sample: {sales_sample.height} rows -> {path}")
