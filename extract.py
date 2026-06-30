@@ -12,6 +12,7 @@ oracledb.defaults.fetch_decimals = True
 
 OUTPUT_DIR = Path("data/raw")
 DIMENSION_TABLES = ["channels", "products", "customers", "times"]
+SALES_BATCH_SIZE = 50000
 
 
 def get_connection():
@@ -38,23 +39,24 @@ def extract_table(conn, table: str) -> Path:
     print(f"{table}: {df.height} rows -> {path}")
     return path
 
+def extract_sales_full(conn) -> Path:
+    df_chunks = []
+    for df_chunk in pl.read_database("SELECT * FROM sh.sales", connection=conn, iter_batches=True, batch_size=SALES_BATCH_SIZE):
+        df_chunks.append(df_chunk)
+        print(f"Chunk {len(df_chunks)}: {df_chunk.height} rows")
+
+    df = pl.concat(df_chunks)
+    path = write_parquet(df, "sales")
+    print(f"sales: {df.height} rows -> {path}")
+    return path
+
+
+
 
 if __name__ == "__main__":
     with get_connection() as conn:
         for table in DIMENSION_TABLES:
             extract_table(conn, table)
 
-        salesQuery = """
-                SELECT
-                    prod_id,
-                    cust_id,
-                    time_id,
-                    channel_id,
-                    amount_sold
-                FROM sh.sales
-                FETCH FIRST 1000 ROWS ONLY
-            """
-
-        sales_sample = pl.read_database(salesQuery, conn)
-        path = write_parquet(sales_sample, "sales_sample")
-        print(f"sales_sample: {sales_sample.height} rows -> {path}")
+        extract_sales_full(conn=conn)    
+    
