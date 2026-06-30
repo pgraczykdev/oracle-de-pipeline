@@ -43,14 +43,12 @@ def extract_sales_full(conn) -> Path:
     df_chunks = []
     for df_chunk in pl.read_database("SELECT * FROM sh.sales", connection=conn, iter_batches=True, batch_size=SALES_BATCH_SIZE):
         df_chunks.append(df_chunk)
-        print(f"Chunk {len(df_chunks)}: {df_chunk.height} rows")
+        print(f"Sales chunk {len(df_chunks)}: {df_chunk.height} rows")
 
     df = pl.concat(df_chunks)
     path = write_parquet(df, "sales")
     print(f"sales: {df.height} rows -> {path}")
     return path
-
-
 
 
 if __name__ == "__main__":
