@@ -3,3 +3,4 @@ docs/
 .env
 *.parquet
 __pycache__/
+data/watermark.json
