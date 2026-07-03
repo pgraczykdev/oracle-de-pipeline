@@ -1,4 +1,5 @@
 import os
+import logging
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,6 +8,15 @@ import oracledb
 import polars as pl
 
 from dotenv import load_dotenv
+
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -54,7 +64,7 @@ def write_parquet(df: pl.DataFrame, name: str) -> Path:
 def extract_table(conn, table: str) -> Path:
     df = pl.read_database(f"SELECT * FROM sh.{table}", connection=conn)
     path = write_parquet(df, table)
-    print(f"{table}: {df.height} rows -> {path}")
+    logger.info(f"{table}: {df.height} rows -> {path}")
     return path
 
 
@@ -62,12 +72,12 @@ def extract_sales_full(conn) -> Path:
     df_chunks = []
     for df_chunk in pl.read_database("SELECT * FROM sh.sales", connection=conn, iter_batches=True, batch_size=SALES_BATCH_SIZE):
         df_chunks.append(df_chunk)
-        print(f"Sales chunk {len(df_chunks)}: {df_chunk.height} rows")
+        logger.info(f"Sales chunk {len(df_chunks)}: {df_chunk.height} rows")
 
     df = pl.concat(df_chunks)
     save_watermark(df["TIME_ID"].max())
     path = write_parquet(df, "sales")
-    print(f"sales: {df.height} rows -> {path}")
+    logger.info(f"sales: {df.height} rows -> {path}")
     return path
 
 
@@ -80,22 +90,22 @@ def extract_sales_incremental(conn, watermark: datetime) -> Path | None:
     df_chunks = []
     for df_chunk in pl.read_database(query, connection=conn, iter_batches=True, batch_size=SALES_BATCH_SIZE):
         df_chunks.append(df_chunk)
-        print(f"Sales incremental chunk {len(df_chunks)}: {df_chunk.height} rows")
+        logger.info(f"Sales incremental chunk {len(df_chunks)}: {df_chunk.height} rows")
     
     if not df_chunks:
-        print("No new rows since last watermark.")
-        return None  
+        logger.info("No new rows since last watermark.")
+        return None
 
     df = pl.concat(df_chunks)
     save_watermark(df["TIME_ID"].max())
     path = write_parquet(df, "sales_incremental")
-    print(f"sales_incremental: {df.height} rows -> {path}")
+    logger.info(f"sales_incremental: {df.height} rows -> {path}")
     return path
 
 
 def extract_sales(conn, watermark: datetime | None) -> Path | None:
     if watermark is None:
-        print("No watermark found, extracting full sales table.")
+        logger.info("No watermark found, extracting full sales table.")
         return extract_sales_full(conn)
 
     return extract_sales_incremental(conn, watermark)           
@@ -104,7 +114,15 @@ def extract_sales(conn, watermark: datetime | None) -> Path | None:
 if __name__ == "__main__":
     with get_connection() as conn:
         for table in DIMENSION_TABLES:
-            extract_table(conn, table)
+            try:
+                extract_table(conn, table)
+            except Exception as e:
+                logger.error(f"{table}: failed — {e}")
 
         watermark = read_watermark()
-        extract_sales(conn=conn, watermark=watermark)    
+        logger.info(f"Using watermark: {watermark}")
+        try:
+            extract_sales(conn, watermark)
+        except Exception as e:
+            logger.error(f"Failed to extract sales: {e}")
+   
