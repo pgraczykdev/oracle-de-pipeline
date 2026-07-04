@@ -14,7 +14,7 @@ connection = oracledb.connect(
 )
 
 with connection.cursor() as cur:
-    cur.execute("SELECT 'połączono!' FROM dual")
+    cur.execute("SELECT 'connected!' FROM dual")
     print(cur.fetchone()[0])
 
 connection.close()
