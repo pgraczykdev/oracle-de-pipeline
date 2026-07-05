@@ -21,6 +21,7 @@ def find_latest_parquet_file(table_name: str) -> Path:
     latest_file = max(parquet_files, key=lambda file: file.stat().st_mtime)
     return latest_file
 
+
 def load_staging_table(conn, table_name: str, is_fact: bool = False):
     if is_fact:
         parquet_file = find_latest_parquet_file(table_name)
@@ -29,19 +30,65 @@ def load_staging_table(conn, table_name: str, is_fact: bool = False):
     sql = f"CREATE OR REPLACE TABLE staging.{table_name} AS SELECT * FROM read_parquet('{parquet_file}')"
     logging.info(f"Loading {table_name} table into staging table...")
     conn.execute(sql)
-    sql = f"SELECT COUNT(*) FROM staging.{table_name}"
-    result = conn.execute(sql).fetchone()
-    logging.info(f"Loaded {result[0]} rows into staging table.")
+    log_how_many_loaded_rows(conn, "staging", table_name)
 
 
-def load_core_table(conn, target_table_name: str, source_table_name: str):
+
+def log_how_many_loaded_rows(conn, schema_name: str, table_name: str) -> int:
+    result = conn.execute(f"SELECT COUNT(*) FROM {schema_name}.{table_name}").fetchone()
+    logging.info(f"Loaded {result[0]} rows into {schema_name}.{table_name}.")
+    return result[0]
+
+
+
+def has_rows(conn, table_name: str) -> bool:
+    sql = f"SELECT 1 FROM main.{table_name} LIMIT 1"
+    try:
+        result = conn.execute(sql).fetchone()
+    except Exception as e:
+        logging.info(f"Error occurred while checking rows in {table_name}: {e}")
+        return False
+    return result is not None
+
+
+
+def load_core_fact_table(conn, target_table_name: str, source_table_name: str):
+    trg_has_rows = has_rows(conn, target_table_name)
+    if not trg_has_rows:
+        sql = f"CREATE OR REPLACE TABLE main.{target_table_name} AS SELECT * FROM staging.{source_table_name}"
+        logging.info(f"Loading {source_table_name} table into core table...")
+        conn.execute(sql)
+        log_how_many_loaded_rows(conn, "main", target_table_name)
+    else:
+        logging.info(f"Fact table {target_table_name} already has rows.")
+        sql = f"""INSERT INTO main.{target_table_name}
+                  SELECT * FROM staging.{source_table_name} src 
+                  WHERE src.time_id > (SELECT MAX(time_id) FROM main.{target_table_name})"""
+        count_sql = f"""SELECT COUNT(*) FROM staging.{source_table_name}
+                        WHERE time_id > (SELECT MAX(time_id) FROM main.{target_table_name})"""
+        new_rows = conn.execute(count_sql).fetchone()[0]
+        logging.info(f"Loading {source_table_name} table into core table...")
+        conn.execute(sql)
+        logging.info(f"Inserted {new_rows} new rows into main.{target_table_name}.")
+
+
+
+def load_core_dimension_table(conn, target_table_name: str, source_table_name: str):
     sql = f"CREATE OR REPLACE TABLE main.{target_table_name} AS SELECT * FROM staging.{source_table_name}"
     logging.info(f"Loading {source_table_name} table into core table...")
     conn.execute(sql)
-    sql = f"SELECT COUNT(*) FROM main.{target_table_name}"
-    result = conn.execute(sql).fetchone()
-    logging.info(f"Loaded {result[0]} rows into core table.")
 
+    log_how_many_loaded_rows(conn, "main", target_table_name)
+
+
+
+def load_core_table(conn, target_table_name: str, source_table_name: str, is_fact: bool = False):
+    if is_fact:
+        load_core_fact_table(conn, target_table_name, source_table_name)
+    else:
+        load_core_dimension_table(conn, target_table_name, source_table_name)
+       
+   
 
 def load_staging(conn):
     sql = "CREATE SCHEMA IF NOT EXISTS staging"
@@ -64,13 +111,13 @@ def load_core(conn):
     conn.execute(sql)
     for table in DIMENSION_TABLES:
         try:
-            load_core_table(conn, f"dim_{table}", table)
+            load_core_table(conn, f"dim_{table}", table, is_fact=False)
         except Exception as e:
             logging.error(f"Error occurred while loading {table} into core: {e}")
             
     for table in FACT_TABLES:
         try:
-           load_core_table(conn, f"fct_{table}", table)
+           load_core_table(conn, f"fct_{table}", table, is_fact=True)
         except Exception as e:
             logging.error(f"Error occurred while loading {table}: {e}")
 
