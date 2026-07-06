@@ -4,3 +4,7 @@ docs/
 *.parquet
 __pycache__/
 data/
+logs/
+dbt/logs/
+dbt/target/
+dbt/dbt_packages/
