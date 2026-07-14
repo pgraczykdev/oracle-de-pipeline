@@ -1,11 +1,9 @@
 import os
 import logging
 
-import oracledb
-
 from dotenv import load_dotenv
 
-from .extractors import OracleExtractor
+from .extractors import OracleExtractor, DummyJsonExtractor
 from .io import read_watermark
 
 
@@ -18,12 +16,13 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-oracledb.defaults.fetch_decimals = True
-
-DIMENSION_TABLES = ["channels", "products", "customers", "times"]
+ORACLE_DIMENSION_TABLES = ["channels", "products", "customers", "times"]
+DUMMY_JSON_DIMENSION_TABLES = ["products", "users", "dates"]
 
 
 def get_connection():
+    import oracledb
+    oracledb.defaults.fetch_decimals = True
     return oracledb.connect(
         user=os.environ["ORACLE_USER"],
         password=os.environ["ORACLE_PASSWORD"],
@@ -35,16 +34,29 @@ def get_connection():
 
 
 if __name__ == "__main__":
-    with get_connection() as conn:
-        extractor = OracleExtractor(conn)
+    source = os.environ.get("EXTRACTOR", "oracle")
+
+    if source == "DUMMY_JSON":
+        extractor = DummyJsonExtractor()
+        tables = DUMMY_JSON_DIMENSION_TABLES
         try:
-            extractor.extract_dimensions(DIMENSION_TABLES)
+            extractor.extract_dimensions(tables)
         except Exception as e:
             logger.error(f"Dimensions failed: {e}")
-
-        watermark = read_watermark()
-        logger.info(f"Using watermark: {watermark}")
         try:
-            extractor.extract_facts(watermark)
+            extractor.extract_facts(None)
         except Exception as e:
-            logger.error(f"Failed to extract sales: {e}")
+            logger.error(f"Facts failed: {e}")
+    else:
+        with get_connection() as conn:
+            extractor = OracleExtractor(conn)
+            try:
+                extractor.extract_dimensions(ORACLE_DIMENSION_TABLES)
+            except Exception as e:
+                logger.error(f"Dimensions failed: {e}")
+            watermark = read_watermark()
+            logger.info(f"Using watermark: {watermark}")
+            try:
+                extractor.extract_facts(watermark)
+            except Exception as e:
+                logger.error(f"Failed to extract sales: {e}")

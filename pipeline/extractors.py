@@ -1,9 +1,9 @@
 
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Protocol
 import logging
-
+import requests
 import polars as pl
 
 from .io import write_parquet, save_watermark
@@ -17,6 +17,97 @@ class SourceExtractor(Protocol):
     def extract_dimensions(self, tables: list[str]) -> list[Path]: ...
     def extract_facts(self, watermark: datetime | None) -> Path | None: ...
 
+
+class DummyJsonExtractor():
+    BASE_URL = "https://dummyjson.com"
+
+
+    def _fetch_all(self, endpoint) -> list[dict]:
+        collected = []
+        skip = 0
+        limit = 100
+        key = endpoint.strip('/')
+
+        while True:
+            response = requests.get(f"{self.BASE_URL}{endpoint}?limit={limit}&skip={skip}")
+            response.raise_for_status()
+            data = response.json()
+            collected.extend(data[key])
+            skip += limit
+            if skip >= data['total']:
+                break
+
+        return collected
+    
+  
+    def extract_dimensions(self, tables: list[str]) -> list[Path]:
+        paths = []
+        for table in tables:
+            if table == "products":
+                data = self._fetch_all("/products")
+                df = pl.DataFrame([{
+                    "product_id": p["id"],
+                    "product_name": p["title"],
+                    "category": p["category"],
+                    "price": p["price"],
+                    "brand": p.get("brand"),
+                    "rating": p["rating"],
+                    "stock": p["stock"],
+                } for p in data])
+
+            elif table == "users":
+                data = self._fetch_all("/users")
+                df = pl.DataFrame([{
+                   "user_id": u["id"],
+                   "first_name": u["firstName"],
+                   "last_name": u["lastName"],
+                   "age": u["age"],
+                   "gender": u["gender"],
+                   "city": u["address"]["city"],
+                   "state": u["address"]["state"],
+                   "country": u["address"]["country"],
+                } for u in data])
+            else:
+                days = [date(2024, 1, 1) + timedelta(days=i) for i in range(366)]
+                df = pl.DataFrame([{
+                "date_id": int(d.strftime("%Y%m%d")),
+                "date": d,
+                "day": d.day,
+                "month": d.month,
+                "year": d.year,
+                "quarter": ((d.month - 1) // 3) + 1,
+                } for d in days])
+            path = write_parquet(df, table)
+            logger.info(f"{table}: {df.height} rows -> {path}")
+            paths.append(path)
+        return paths
+    
+
+    def extract_facts(self, watermark: datetime | None) -> Path | None:
+        rows = []
+        carts = self._fetch_all('/carts')
+        for cart in carts:
+            order_date = date(2024, 1, 1) + timedelta(days=cart["id"] - 1)
+            for product in cart["products"]:
+                rows.append({
+                    "cart_id":          cart["id"],
+                    "user_id":          cart["userId"],
+                    "product_id":       product["id"],
+                    "order_date":       order_date,
+                    "quantity":         product["quantity"],
+                    "price":            product["price"],
+                    "total":            product["total"],
+                    "discounted_total": product["discountedTotal"],    
+                })
+        if not rows:
+            logger.info("No orders fetched.")
+            return None
+        df = pl.DataFrame(rows)
+        path = write_parquet(df, "orders")
+        logger.info(f"orders: {df.height} rows -> {path}")
+        return path
+
+            
 
 class OracleExtractor:
     def __init__(self, conn):
