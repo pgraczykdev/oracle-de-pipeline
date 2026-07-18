@@ -1,11 +1,25 @@
+import os
 import duckdb, logging
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
 
+
+SOURCE = os.environ.get("EXTRACTOR", "oracle")
 DB_PATH = Path("data/warehouse.duckdb")
 PARQUET_DIR = Path("data/raw")
-DIMENSION_TABLES = ["channels", "products", "customers", "times"]
-FACT_TABLES = ["sales"]
+
+ORACLE_DIMENSION_TABLES = ["channels", "products", "customers", "times"]
+ORACLE_FACT_TABLES = ["sales"]
+
+DUMMY_JSON_DIMENSION_TABLES = ["products", "users", "dates"]
+DUMMY_JSON_FACT_TABLES = ["orders"]
+
+DIMENSION_TABLES = ORACLE_DIMENSION_TABLES if SOURCE == 'oracle' else DUMMY_JSON_DIMENSION_TABLES
+FACT_TABLES = ORACLE_FACT_TABLES if SOURCE == 'oracle' else DUMMY_JSON_FACT_TABLES
+
+WATERMARK_COL = "time_id" if SOURCE == "oracle" else "order_date"
 
 
 logging.basicConfig(
@@ -52,7 +66,7 @@ def has_rows(conn, table_name: str) -> bool:
 
 
 
-def load_core_fact_table(conn, target_table_name: str, source_table_name: str):
+def load_core_fact_table(conn, target_table_name: str, source_table_name: str, watermark_col: str):
     trg_has_rows = has_rows(conn, target_table_name)
     if not trg_has_rows:
         sql = f"CREATE OR REPLACE TABLE main.{target_table_name} AS SELECT * FROM staging.{source_table_name}"
@@ -63,9 +77,9 @@ def load_core_fact_table(conn, target_table_name: str, source_table_name: str):
         logging.info(f"Fact table {target_table_name} already has rows.")
         sql = f"""INSERT INTO main.{target_table_name}
                   SELECT * FROM staging.{source_table_name} src 
-                  WHERE src.time_id > (SELECT MAX(time_id) FROM main.{target_table_name})"""
+                  WHERE src.{watermark_col} > (SELECT MAX({watermark_col}) FROM main.{target_table_name})"""
         count_sql = f"""SELECT COUNT(*) FROM staging.{source_table_name}
-                        WHERE time_id > (SELECT MAX(time_id) FROM main.{target_table_name})"""
+                        WHERE {watermark_col} > (SELECT MAX({watermark_col}) FROM main.{target_table_name})"""
         new_rows = conn.execute(count_sql).fetchone()[0]
         logging.info(f"Loading {source_table_name} table into core table...")
         conn.execute(sql)
@@ -84,7 +98,7 @@ def load_core_dimension_table(conn, target_table_name: str, source_table_name: s
 
 def load_core_table(conn, target_table_name: str, source_table_name: str, is_fact: bool = False):
     if is_fact:
-        load_core_fact_table(conn, target_table_name, source_table_name)
+        load_core_fact_table(conn, target_table_name, source_table_name, WATERMARK_COL)
     else:
         load_core_dimension_table(conn, target_table_name, source_table_name)
        
@@ -93,6 +107,7 @@ def load_core_table(conn, target_table_name: str, source_table_name: str, is_fac
 def load_staging(conn):
     sql = "CREATE SCHEMA IF NOT EXISTS staging"
     conn.execute(sql)
+    
     for table in DIMENSION_TABLES:
         try:
             load_staging_table(conn, table, is_fact=False)
