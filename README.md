@@ -1,204 +1,158 @@
-# oracle-de-pipeline
+# de-batch-pipeline
 
-A batch data pipeline from Oracle Autonomous Database (OCI) through a local DuckDB warehouse.
-Built as a hands-on learning project covering core Data Engineering patterns:
-ELT, star schema, incremental loads, type-safe extraction, and OOP abstractions.
+Batch pipeline in Python that extracts data from a REST API (DummyJSON) or Oracle ADB, stores it as Parquet files (Data Lake), loads it into DuckDB, and transforms it with dbt into a star schema ready for analytics.
 
 ---
 
 ## Architecture
 
 ```
-Oracle Autonomous Database (OCI)
-  schema: SH (Sales History)
-  user:   DE_LAB (least-privilege)
-       │
-       │  python-oracledb  (thin mode, wallet/mTLS)
-       ▼
-  pipeline/extract.py  ←  OracleExtractor(SourceExtractor Protocol)
-   ├── dimension tables ──► channels, products, customers, times
-   │   SELECT * FROM sh.<table>           (full load each run)
-   │
-   └── fact table ─────────► sales
-       first run:  SELECT * FROM sh.sales           (full load)
-       next runs:  WHERE time_id > <watermark>      (incremental)
-       batched:    50 000 rows per chunk
-       │
-       ▼
-  data/raw/
-   ├── channels_YYYYMMDD.parquet
-   ├── products_YYYYMMDD.parquet
-   ├── customers_YYYYMMDD.parquet
-   ├── times_YYYYMMDD.parquet
-   └── sales_YYYYMMDD.parquet
-       data/watermark.json  ← last extracted TIME_ID
-       │
-       │  duckdb
-       ▼
-  pipeline/load.py
-   ├── staging schema  ──► staging.channels / products / customers / times / sales
-   │   CREATE OR REPLACE TABLE … AS SELECT * FROM read_parquet(…)
-   │
-   └── main (core) schema ─► star schema
-       ├── main.dim_channels
-       ├── main.dim_products
-       ├── main.dim_customers
-       ├── main.dim_times
-       └── main.fct_sales   (incremental INSERT on re-runs)
-       │
-       ▼
-  data/warehouse.duckdb
+API (DummyJSON) / Oracle ADB
+          │
+          ▼  pipeline/extract.py
+  data/raw/*.parquet   (Data Lake — immutable, timestamped)
+          │
+          ▼  pipeline/load.py
+  DuckDB  staging.*    (raw 1:1 copy from Parquet)
+          │
+          ▼  dbt
+  DuckDB  dbt_dev.*
+     ├── staging layer   dj_stg_* / o_stg_*   (rename, normalize)
+     ├── core layer      dim_products, dim_users, dim_dates, fct_orders
+     └── mart layer      mart_revenue_by_category
 ```
 
 ---
 
-## Where this fits in the DE roadmap
+## Tech Stack
 
-| Layer | Phases 1–2 (this project) | Planned |
-|---|---|---|
-| Storage & Databases | Oracle ADB (source) · Parquet · DuckDB | Snowflake |
-| Data Ingestion | Batch extract — watermark incremental | Phase 5: streaming via Kafka / Oracle AQ |
-| Data Pipelines | Python + SQL · OOP extractor abstraction | Phase 3: dbt · Phase 4: Airflow |
-| Data Warehouse | DuckDB star schema (staging → core) | Phase 3: dbt models on top |
-| Version Control | Git + GitHub | Docker, GitHub Actions |
-
----
-
-## Tech stack
-
-| Tool | Purpose |
+| Tool | Role |
 |---|---|
-| `python-oracledb` (thin) | Oracle DB driver, wallet/mTLS auth, no Oracle Client needed |
-| `polars` | DataFrame library — fast, columnar, Rust-backed |
-| `pyarrow` | Parquet write backend used by polars |
-| `duckdb` | Local analytical warehouse — reads Parquet natively |
-| `python-dotenv` | Load secrets from `.env` at runtime |
+| Python 3.12 | Pipeline orchestration |
+| Polars | DataFrame processing, Parquet I/O |
+| DuckDB | Local analytical warehouse |
+| dbt-duckdb | SQL transformations, star schema, data tests |
+| python-oracledb (thin) | Oracle ADB connector — wallet/mTLS, no Oracle Client needed |
+| requests | REST API client (DummyJSON) |
+| python-dotenv | Secrets management via `.env` |
 
 ---
 
-## Prerequisites
+## Data Sources
 
-- Python 3.11+
-- Oracle Autonomous Database (OCI) with the sample `SH` schema
-- Wallet files (`tnsnames.ora` + `ewallet.pem`) downloaded from OCI console
-- A low-privilege DB user with `SELECT ANY TABLE` on the `SH` schema
+The active source is selected via the `EXTRACTOR` environment variable:
 
----
-
-## Setup
-
-1. Clone the repo and create a virtual environment:
-
-   ```bash
-   python -m venv .venv
-   .venv\Scripts\activate                                      # Windows
-   pip install python-oracledb polars pyarrow python-dotenv duckdb
-   ```
-
-2. Create `.env` in the project root (never commit this file):
-
-   ```
-   ORACLE_USER=your_user
-   ORACLE_PASSWORD=your_password
-   ORACLE_DSN=your_tns_alias
-   WALLET_DIR=C:\path\to\wallet
-   WALLET_PASSWORD=your_wallet_password
-   ```
-
-3. Place wallet files (`tnsnames.ora`, `ewallet.pem`) in the directory set as `WALLET_DIR`.
+| `EXTRACTOR` | Source | Dimensions | Facts |
+|---|---|---|---|
+| `DUMMY_JSON` | [DummyJSON API](https://dummyjson.com) | products, users, dates | orders (carts) |
+| `oracle` (default) | Oracle ADB — schema `SH` | channels, products, customers, times | sales |
 
 ---
 
-## Usage
+## How to Run
 
-**Step 1 — Extract from Oracle to Parquet:**
+**1. Clone and install**
 
 ```bash
+git clone https://github.com/pgraczykdev/de-batch-pipeline
+cd de-batch-pipeline
+python -m venv .venv
+.venv\Scripts\activate      # Windows
+pip install -r requirements.txt
+```
+
+**2. Configure environment**
+
+Create `.env` in the project root (never commit this):
+
+```env
+EXTRACTOR=DUMMY_JSON
+
+# Required only when EXTRACTOR=oracle
+ORACLE_USER=...
+ORACLE_PASSWORD=...
+ORACLE_DSN=...
+WALLET_DIR=...
+WALLET_PASSWORD=...
+```
+
+**3. Configure dbt**
+
+Create `~/.dbt/profiles.yml`:
+
+```yaml
+oracle_pipeline:
+  outputs:
+    dev:
+      type: duckdb
+      path: /absolute/path/to/de-batch-pipeline/data/warehouse.duckdb
+      threads: 1
+      schema: dbt_dev
+  target: dev
+```
+
+**4. Run the pipeline**
+
+```bash
+# Extract — fetch data, save as Parquet
 python -m pipeline.extract
-```
 
-First run: full load of all dimension tables + full `sh.sales`.
-Saves `data/watermark.json` with the max `TIME_ID` from `sales`.
-
-Subsequent runs: dimensions reload in full; `sales` fetches only rows newer than the watermark.
-
-**Step 2 — Load into DuckDB warehouse:**
-
-```bash
+# Load — Parquet → DuckDB staging + core schemas
 python -m pipeline.load
+
+# Transform — run all dbt layers
+cd dbt
+dbt run
+
+# Test — validate data quality
+dbt test
 ```
-
-Loads Parquet files into `data/warehouse.duckdb`:
-- `staging.*` — raw 1:1 copy of Parquet data
-- `main.dim_*` / `main.fct_*` — star schema; `fct_sales` uses incremental INSERT on re-runs
-
-**Step 3 — Run analytical queries:**
-
-```bash
-python -m pipeline.query
-```
-
-Demonstrates revenue aggregations by channel, product, and year, plus window functions.
 
 ---
 
-## Key DE concepts demonstrated
+## Key DE Concepts Demonstrated
 
-**ELT pattern** — data lands in the warehouse first (Load), transformations happen inside
-the warehouse (dbt in Phase 3). Staging layer = raw copy; core layer = curated star schema.
+**ELT pattern** — data lands raw in the warehouse (Load), transformations happen inside the warehouse (dbt). Parquet = Data Lake; DuckDB = warehouse.
 
-**Star schema** — `fct_sales` as the central fact table, four `dim_*` tables around it.
-Every analytical query follows a predictable JOIN shape: fact + one or more dimensions.
+**Star schema** — `fct_orders` as the central fact table surrounded by `dim_products`, `dim_users`, `dim_dates`. Every analytical query follows a predictable JOIN shape.
 
-**Idempotency** — date stamp in Parquet filenames (`sales_20260706.parquet`).
-Re-running on the same day overwrites, not appends. `CREATE OR REPLACE TABLE` in DuckDB
-ensures the warehouse rebuilds cleanly from scratch on every full run.
+**Watermark incremental load** — after a full extract, the max date is saved to `data/watermark.json`. Subsequent runs fetch only rows newer than the watermark.
 
-**Incremental load (watermark pattern)** — after a full extract, `max(TIME_ID)` is
-written to `data/watermark.json`. The next run queries only `WHERE time_id > <watermark>`.
-The same pattern is applied inside DuckDB: `fct_sales` only inserts rows newer than its
-current `MAX(time_id)`.
+**OOP extractor abstraction** — `OracleExtractor` and `DummyJsonExtractor` both implement the `SourceExtractor` Protocol (`extract_dimensions`, `extract_facts`). Switching sources requires only setting `EXTRACTOR` in `.env`.
 
-**Type precision** — `oracledb.defaults.fetch_decimals = True` forces `AMOUNT_SOLD`
-to arrive as Python `Decimal`, not `float`. Preserved through the full round-trip:
-Oracle → polars → Parquet → DuckDB (`DECIMAL(38,2)`).
+**dbt layers** — staging renames and normalizes; core builds the star schema as TABLE; marts provide ready-to-use business aggregations.
 
-**Batched reads** — `sh.sales` is fetched in chunks of 50 000 rows via
-`polars.read_database(..., iter_batches=True, batch_size=50_000)`.
-Controls both memory usage and Oracle network round-trips.
+**Data quality tests** — dbt `schema.yml` enforces `not_null`, `unique`, and `relationships` constraints on core models. Tests run as SQL queries against live warehouse data.
 
-**OOP extractor abstraction** — `OracleExtractor` implements the `SourceExtractor` Protocol.
-Swapping the source database requires only a new class implementing the same two-method
-interface (`extract_dimensions`, `extract_facts`), with no changes to the load or query layer.
+**Type precision** — `oracledb.defaults.fetch_decimals = True` forces money columns to `Decimal`, not `float`, through the full round-trip: Oracle → Polars → Parquet → DuckDB.
 
-**Least privilege** — extraction runs as `DE_LAB`, a dedicated user with read-only
-access to `SH`. Not as `ADMIN`.
-
-**Secrets outside code** — credentials and wallet path live in `.env`, excluded
-from version control via `.gitignore`.
+**Secrets outside code** — credentials live in `.env`, excluded from version control via `.gitignore`.
 
 ---
 
-## Project structure
+## Project Structure
 
 ```
-oracle-de-pipeline/
+de-batch-pipeline/
 ├── pipeline/
-│   ├── __init__.py
-│   ├── extract.py       entry point: get_connection, __main__ orchestration
-│   ├── extractors.py    SourceExtractor Protocol + OracleExtractor class
-│   ├── io.py            write_parquet, read/save_watermark — shared I/O utilities
-│   ├── load.py          staging + core (star schema) load into DuckDB
-│   └── query.py         analytical query examples (aggregations, window functions)
-├── scripts/
-│   ├── check_connection.py   verify Oracle connectivity
-│   └── explore_duckdb.py     inspect Parquet files directly via DuckDB
+│   ├── extract.py       entry point — selects source, runs extraction
+│   ├── extractors.py    OracleExtractor + DummyJsonExtractor (Protocol)
+│   ├── load.py          Parquet → DuckDB (staging + core schemas)
+│   └── io.py            write_parquet, watermark read/save
+├── dbt/
+│   └── models/
+│       ├── staging/
+│       │   ├── oracle/      o_stg_channels, o_stg_products, o_stg_customers, o_stg_times, o_stg_sales
+│       │   └── dummyjson/   dj_stg_products, dj_stg_users, dj_stg_dates, dj_stg_orders
+│       ├── core/            dim_products, dim_users, dim_dates, fct_orders + schema tests
+│       └── marts/           mart_revenue_by_category
 ├── data/
-│   ├── raw/             Parquet output (gitignored)
-│   ├── warehouse.duckdb DuckDB warehouse file (gitignored)
+│   ├── raw/             Parquet files (gitignored)
+│   ├── warehouse.duckdb DuckDB warehouse (gitignored)
 │   └── watermark.json   incremental load bookmark (gitignored)
-├── .env                 secrets — never committed
-└── .gitignore
+├── requirements.txt
+└── .env                 secrets — never committed
+
 ```
 
 ---
@@ -209,6 +163,6 @@ oracle-de-pipeline/
 |---|---|---|---|
 | 1 | Extract Oracle → Parquet | python-oracledb, polars | done |
 | 2 | Load into a local warehouse | DuckDB, star schema | done |
-| 3 | Transform with dbt | dbt-core, dbt-duckdb | next |
+| 3 | Transform with dbt | dbt-core, dbt-duckdb | done |
 | 4 | Orchestrate the pipeline | Apache Airflow | planned |
-| 5 | Streaming (Oracle AQ → Kafka) | Kafka, Oracle Advanced Queuing | planned |
+| 5 | Streaming | Kafka / Oracle AQ | planned |
