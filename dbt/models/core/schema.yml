@@ -1,0 +1,42 @@
+version: 2
+
+models:
+  - name: dim_products
+    columns:
+      - name: product_id
+        tests:
+          - not_null
+          - unique
+  
+  - name: dim_users
+    columns: 
+      - name: user_id
+        tests:
+          - not_null
+          - unique
+  
+  - name: dim_dates
+    columns: 
+      - name: date_id
+        tests:
+          - not_null
+          - unique
+
+  - name: fct_orders
+    columns: 
+      - name: cart_id
+        tests:
+          - not_null
+      - name: product_id
+        tests:
+          - relationships: 
+              arguments:
+                to: ref('dim_products')
+                field: product_id
+      - name: user_id
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_users')
+                field: user_id
+    
